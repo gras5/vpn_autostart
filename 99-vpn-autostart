@@ -1,0 +1,45 @@
+#!/bin/sh
+
+TRIGGER_IFACE=$(uci -q get vpn_autostart.main.trigger_interface || echo "wan")
+TRIGGER_DELAY=$(uci -q get vpn_autostart.main.trigger_delay || echo "30")
+TUNNEL_IFACE=$(uci -q get vpn_autostart.main.tunnel_interface || echo "awg0")
+CHECK_DELAY=$(uci -q get vpn_autostart.main.check_delay || echo "30")
+SERVICE_NAME=$(uci -q get vpn_autostart.main.service_name || echo "podkop")
+
+if [ "$INTERFACE" = "$TRIGGER_IFACE" ]; then
+    case "$ACTION" in
+        ifup)
+            /etc/init.d/"$SERVICE_NAME" stop >/dev/null 2>&1
+
+            (
+                sleep "$TRIGGER_DELAY"
+                logger -t vpn_autostart "Interface $TRIGGER_IFACE stabilized. Bringing up $TUNNEL_IFACE..."
+                ifup "$TUNNEL_IFACE"
+                
+                sleep "$CHECK_DELAY"
+                
+                if [ -d "/sys/class/net/$TUNNEL_IFACE" ]; then
+                    RX=$(cat /sys/class/net/$TUNNEL_IFACE/statistics/rx_packets 2>/dev/null || echo 0)
+                    
+                    if [ "$RX" -eq 0 ]; then
+                        logger -t vpn_autostart "WARNING: 0 rx packets on $TUNNEL_IFACE within $CHECK_DELAY sec. Server didn't respond. Shutting down."
+                        ifdown "$TUNNEL_IFACE"
+                        /etc/init.d/"$SERVICE_NAME" stop
+                    else
+                        logger -t vpn_autostart "SUCCESS: Traffic detected on $TUNNEL_IFACE ($RX packets). Starting $SERVICE_NAME..."
+                        /etc/init.d/"$SERVICE_NAME" start
+                    fi
+                else
+                    logger -t vpn_autostart "ERROR: Interface $TUNNEL_IFACE does not exist. Blocking $SERVICE_NAME startup."
+                    /etc/init.d/"$SERVICE_NAME" stop
+                fi
+            ) &
+            ;;
+            
+        ifdown)
+            logger -t vpn_autostart "Interface $TRIGGER_IFACE went down. Stopping $TUNNEL_IFACE and $SERVICE_NAME."
+            ifdown "$TUNNEL_IFACE"
+            /etc/init.d/"$SERVICE_NAME" stop
+            ;;
+    esac
+fi
